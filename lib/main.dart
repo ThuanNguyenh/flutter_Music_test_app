@@ -32,10 +32,9 @@ class MyHomePage extends StatefulWidget {
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> with SingleTickerProviderStateMixin {
+class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
   late AnimationController _controller;
   ValueNotifier<bool> isPlayingNotifier = ValueNotifier<bool>(false);
-
   @override
   void initState() {
     super.initState();
@@ -63,29 +62,19 @@ class _MyHomePageState extends State<MyHomePage> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white38,
-      appBar: AppBar(
-        backgroundColor: Colors.deepPurple,
-        title: Text(
-          widget.title,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-      ),
+      backgroundColor: const Color(0xFF34224F),
       body: Center(
         child: Column(
           children: <Widget>[
             Container(
-              height: 50,
-              color: Colors.deepPurple,
-            ),
-            Container(
-              color: Colors.deepPurple,
+              color: const Color(0xFF34224F),
+              padding: const EdgeInsets.only(top: 100),
               child: RotationTransition(
                 turns: _controller,
                 child: Image.asset(
                   'lib/images/cd.png',
                   fit: BoxFit.cover,
+                  color: Colors.white38,
                 ),
               ),
             ),

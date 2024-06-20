@@ -3,74 +3,73 @@ import 'dart:convert';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_lyric/lyrics_reader.dart';
-import 'package:flutter_lyric/lyrics_model_builder.dart';
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart' as xml;
+import 'package:flutter/animation.dart';
 
-class Lyric {
+class Word {
+  final double time;
   final String text;
-  final double timestamp;
 
-  Lyric({required this.text, required this.timestamp});
+  Word({required this.time, required this.text});
 }
 
-Future<List<List<Lyric>>> fetchLyrics(String url) async {
+class Line {
+  final double startTime;
+  final double endTime;
+  final List<Word> words;
+
+  Line({required this.startTime, required this.endTime, required this.words});
+}
+
+Future<List<Line>> getLyrics(String url) async {
   final response = await http.get(Uri.parse(url));
 
   if (response.statusCode == 200) {
+    // chuyển từ định dạng byte sang utf-8
     final document = xml.XmlDocument.parse(utf8.decode(response.bodyBytes));
-    final lyricsData = <List<Lyric>>[];
+    final data = <Line>[];
 
     for (final param in document.findAllElements('param')) {
-      final paramLyrics = <Lyric>[];
+      final words = <Word>[];
+      // thời gian bắt đầu và kết thúc của câu
+      double? startTime;
+      double? endTime;
+
       for (final item in param.findAllElements('i')) {
         final text = item.text;
-        final timestamp = double.parse(item.getAttribute('va')!);
-        paramLyrics.add(Lyric(text: text, timestamp: timestamp));
+        // thời gian của từ
+        final timeStamp = double.parse(item.getAttribute('va')!) * 1000;
+
+        // nếu như startTime = null thì startTime = timeStamp
+        // nếu startTime đã có giá trị thì giữ nguyên
+        startTime ??= timeStamp;
+
+        // endTime luôn cập nhật
+        endTime = timeStamp;
+
+        words.add(Word(time: timeStamp, text: text));
       }
-      lyricsData.add(paramLyrics);
+
+      if (startTime != null && endTime != null) {
+        data.add(Line(startTime: startTime, endTime: endTime, words: words));
+      }
     }
 
-    return lyricsData;
+    // cập nhật endTime của mỗi câu
+    for (int i = 0; i < data.length - 1; i++) {
+      if (data[i + 1].startTime - data[i].endTime > 1000) {
+        data[i] = Line(
+            startTime: data[i].startTime,
+            endTime: data[i].endTime + 500,
+            words: data[i].words);
+      }
+    }
+
+    return data;
   } else {
-    throw Exception('Failed to load lyrics');
+    throw Exception('không thể tải lời bài hát.');
   }
-}
-
-String createLyricModel(List<List<Lyric>> lyrics) {
-  final List<String> lyricLines = [];
-
-  for (final line in lyrics) {
-    if (line.isEmpty) continue;
-
-    final mainText = StringBuffer();
-    double startTime = line.first.timestamp * 1000;
-
-    for (final lyric in line) {
-      mainText.write(lyric.text);
-    }
-
-    lyricLines.add(
-        '${_formatDuration(Duration(milliseconds: startTime.toInt()))}$mainText');
-
-    // lyricLines.add(
-    //   '[${Duration(milliseconds: startTime.toInt())}]$mainText'
-    // );
-  }
-  print(lyricLines.join('\n'));
-  return lyricLines.join('\n');
-}
-
-// format thời gian đến mili giây
-String _formatDuration(Duration duration) {
-  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
-  final seconds =
-      (duration.inSeconds.remainder(60) % 60).toString().padLeft(2, '0');
-  final milliseconds =
-      (duration.inMilliseconds % 1000).toString().padLeft(3, '0');
-
-  return '[$minutes:$seconds.$milliseconds]';
 }
 
 // format thời gian đến phút - giây
@@ -91,39 +90,34 @@ class LoadLyrics extends StatefulWidget {
   _LoadLyricsState createState() => _LoadLyricsState();
 }
 
-class _LoadLyricsState extends State<LoadLyrics>
-    with SingleTickerProviderStateMixin {
+class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
   final AudioPlayer audioPlayer = AudioPlayer();
-
-  double _position = 0;
+  double _currentPosition = 0;
   double _maxDuration = 1;
   bool _isPlaying = false;
+  int _currentLineIndex = 0;
+  double wordDuration = 1;
+  double nextStartTime = 0;
 
-  var lyricModel = LyricsModelBuilder.create().bindLyricToMain("").getModel();
+  late List<AnimationController> _charControllers;
+  late List<Animation<Color?>> _colorAnimations;
 
-  late Future<String> normalLyric;
   late StreamSubscription _audioPositionSubscription;
   late StreamSubscription _audioDurationSubscription;
 
-  UINetease lyricUI = UINetease(
-      // defaultSize: 22,
-      // inlineGap: 20,
-      // lineGap: 20,
-      // lyricAlign: LyricAlign.CENTER,
-      // otherMainSize: 16,
-      );
-
-  // List<Lyric> lyrics = [];
+  List<Line> data = [];
+  late Future<List<Line>> lyricsFuture;
 
   @override
   void initState() {
     super.initState();
-    normalLyric = _fetchAndSetLyrics();
+    lyricsFuture = _getAndSet();
 
     _audioPositionSubscription =
         audioPlayer.onPositionChanged.listen((Duration duration) {
       setState(() {
-        _position = duration.inMilliseconds.toDouble();
+        _currentPosition = duration.inMilliseconds.toDouble();
+        _updateCurrentLine();
       });
     });
     _audioDurationSubscription =
@@ -133,26 +127,92 @@ class _LoadLyricsState extends State<LoadLyrics>
       });
     });
 
+    // Khởi tạo AudioPlayer và kiểm tra duration ngay khi tải xong
+    audioPlayer
+        .setSourceUrl(
+            'https://storage.googleapis.com/ikara-storage/tmp/beat.mp3')
+        .then((_) {
+      audioPlayer.getDuration().then((duration) {
+        setState(() {
+          _maxDuration = duration!.inMilliseconds.toDouble();
+        });
+      });
+    });
+
     audioPlayer.onPlayerComplete.listen((event) {
       setState(() {
         _isPlaying = false;
-        _position = 0;
         widget.isPlayingNotifier.value = _isPlaying;
       });
     });
+
+    // Initialize the controllers and animations
+    _charControllers = [];
+    _colorAnimations = [];
   }
 
-  Future<String> _fetchAndSetLyrics() async {
-    final lyricsList = await fetchLyrics(
-        'https://storage.googleapis.com/ikara-storage/ikara/lyrics.xml');
-    final lyricModelString = createLyricModel(lyricsList);
+  // cập nhật vị trí dòng hiện tại
+  void _updateCurrentLine() {
+    int closestIndex = 0; // Biến lưu trữ chỉ số dòng gần nhất
+    double closestDistance =
+        double.infinity; // Biến lưu trữ khoảng cách nhỏ nhất
+
+    for (int i = 0; i < data.length; i++) {
+      double startTime = data[i].startTime;
+      double endTime = data[i].endTime;
+
+      // Tính khoảng cách giữa vị trí hiện tại và thời gian bắt đầu và kết thúc của dòng
+      double distance = (_currentPosition < startTime)
+          ? (startTime - _currentPosition)
+          : (_currentPosition > endTime)
+              ? (_currentPosition - endTime)
+              : 0;
+
+      // Kiểm tra nếu khoảng cách này nhỏ hơn khoảng cách gần nhất được lưu trữ
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = i;
+      }
+
+      // Nếu vị trí hiện tại nằm trong khoảng thời gian của dòng lời bài hát
+      if (_currentPosition >= startTime && _currentPosition <= endTime) {
+        setState(() {
+          _currentLineIndex = i;
+        });
+        return; // Trả về vì đã tìm thấy dòng phù hợp
+      }
+    }
+
+    // Nếu không tìm thấy dòng phù hợp, cập nhật dòng gần nhất
     setState(() {
-      lyricModel = LyricsModelBuilder.create()
-          .bindLyricToMain(lyricModelString)
-          .getModel();
-      // lyrics = lyricsList.expand((element) => element).toList();
+      _currentLineIndex = closestIndex;
     });
-    return lyricModelString;
+  }
+
+  Future<List<Line>> _getAndSet() async {
+    final list = await getLyrics(
+        'https://storage.googleapis.com/ikara-storage/ikara/lyrics.xml');
+    setState(() {
+      data = list;
+      for (final line in data) {
+        for (final word in line.words) {
+          for (int i = 0; i < word.text.length; i++) {
+            final charController = AnimationController(
+              duration: Duration(milliseconds: wordDuration.toInt()),
+              vsync: this, // đồng bộ với tốc độ, đảm bảo mượt mà và tiết kiệm tài nguyên
+            );
+            final charColorTween = ColorTween(
+              begin: Colors.white,
+              end: Colors.yellow,
+            ).animate(charController);
+
+            _charControllers.add(charController);
+            _colorAnimations.add(charColorTween);
+          }
+        }
+      }
+    });
+    return list;
   }
 
   void _playPauseAudio() {
@@ -171,6 +231,9 @@ class _LoadLyricsState extends State<LoadLyrics>
   @override
   void dispose() {
     audioPlayer.dispose();
+    for (var controller in _charControllers) {
+      controller.dispose();
+    }
     _audioPositionSubscription.cancel();
     _audioDurationSubscription.cancel();
     super.dispose();
@@ -179,9 +242,9 @@ class _LoadLyricsState extends State<LoadLyrics>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.deepPurple,
-      body: FutureBuilder<String>(
-        future: normalLyric,
+      backgroundColor: const Color(0xFF34224F),
+      body: FutureBuilder<List<Line>>(
+        future: lyricsFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(
@@ -200,45 +263,109 @@ class _LoadLyricsState extends State<LoadLyrics>
     );
   }
 
-  Widget buildContainer(String normalLyric) {
+  Widget buildContainer(List<Line> lyrics) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.end,
-      children: [buildReaderWidget(normalLyric), buildPlayControl()],
+      children: [buildReaderWidget(), buildPlayControl()],
     );
   }
 
-  Widget buildReaderWidget(String normalLyric) {
-    // int? timeStart = (lyrics.first.timestamp * 1000).toInt();
-    // int? timeLine = 0;
-    // if (_position.toInt() >= timeStart) {
-    //   timeLine = _position.toInt();
-    // } else {
-    //   timeLine =_maxDuration.toInt() - _position.toInt();
-    // }
+  Widget buildReaderWidget() {
+    int currentLineIndex = _currentLineIndex; // Chỉ số của câu đang phát
+    int nextLineIndex = (currentLineIndex + 1); // Chỉ số của câu sắp tới
 
+    // danh sách các widget hiển thị các dòng văn bản
+    List<Widget> linesWidgets = [];
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      height: 300,
-      child: LyricsReader(
-        model: lyricModel,
-        position: _position.toInt(),
-        playing: _isPlaying,
-        size: Size(double.infinity, MediaQuery.of(context).size.height / 2),
-        lyricUi: lyricUI,
-        emptyBuilder: () => const Center(
-          child: Text(
-            "Không có lời bài hát",
+    // Hàm để tạo TextSpan cho từng ký tự
+    TextSpan buildTextSpan(Line line) {
+      List<TextSpan> spans = [];
+      int charControllerIndex = 0;
+
+      for (int i = 0; i < line.words.length; i++) {
+        final word = line.words[i];
+        final wordStartTime = word.time;
+        final wordEndTime =
+            i < line.words.length - 1 ? line.words[i + 1].time : line.endTime;
+        wordDuration = wordEndTime - wordStartTime;
+
+        for (int j = 0; j < word.text.length; j++) {
+          final charTimeStart =
+              wordStartTime + j * (wordDuration / word.text.length);
+
+          if (charControllerIndex >= _charControllers.length) break;
+
+          final charController = _charControllers[charControllerIndex];
+          final charColorTween = _colorAnimations[charControllerIndex];
+
+          if (_currentPosition >= charTimeStart) {
+            charController.forward(
+                from: (_currentPosition - charTimeStart) / wordDuration);
+          } else {
+            charController.reset();
+          }
+
+          spans.add(TextSpan(
+            text: word.text[j],
+            style: TextStyle(
+              color: charColorTween.value, // Áp dụng màu từ Tween
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+            ),
+          ));
+
+          charControllerIndex++;
+        }
+      }
+      return TextSpan(children: spans);
+    }
+
+    // Câu đang phát
+    if (currentLineIndex < data.length) {
+      linesWidgets.add(
+        AnimatedOpacity(
+          duration: const Duration(milliseconds: 500),
+          opacity: 1.0,
+          child: RichText(
+            text: buildTextSpan(data[currentLineIndex]),
+            textAlign: TextAlign.center,
           ),
         ),
+      );
+    }
+
+    // Thêm khoảng cách giữa các câu
+    linesWidgets.add(const SizedBox(height: 20));
+
+    // Câu sắp tới
+    if (nextLineIndex < data.length) {
+      linesWidgets.add(
+        AnimatedOpacity(
+          duration: const Duration(milliseconds: 500),
+          opacity: 0.5,
+          child: RichText(
+            text: buildTextSpan(data[nextLineIndex]),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      height: 300,
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: linesWidgets,
       ),
     );
   }
 
   Widget buildPlayControl() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10),
       height: 100,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.center,
@@ -254,7 +381,7 @@ class _LoadLyricsState extends State<LoadLyrics>
           Container(
             margin: const EdgeInsets.only(left: 10),
             child: Text(
-              '${_formatMinDuration(Duration(milliseconds: _position.toInt()))} / ${_formatMinDuration(Duration(milliseconds: _maxDuration.toInt()))}',
+              '${_formatMinDuration(Duration(milliseconds: _currentPosition.toInt()))} / ${_formatMinDuration(Duration(milliseconds: _maxDuration.toInt()))}',
               style: const TextStyle(color: Colors.white),
             ),
           ),
@@ -262,13 +389,13 @@ class _LoadLyricsState extends State<LoadLyrics>
             child: Slider(
                 min: 0,
                 max: _maxDuration,
-                label: _position.toString(),
-                value: _position,
-                activeColor: Colors.blueGrey,
-                inactiveColor: Colors.blue,
+                label: _currentPosition.toString(),
+                value: _currentPosition,
+                activeColor: Colors.white,
+                inactiveColor: Colors.grey,
                 onChanged: (double value) {
                   setState(() {
-                    _position = value;
+                    _currentPosition = value;
                   });
                   audioPlayer.seek(Duration(milliseconds: value.toInt()));
                 }),
