@@ -99,9 +99,6 @@ class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
   double wordDuration = 1;
   double nextStartTime = 0;
 
-  late List<AnimationController> _charControllers;
-  late List<Animation<Color?>> _colorAnimations;
-
   late StreamSubscription _audioPositionSubscription;
   late StreamSubscription _audioDurationSubscription;
 
@@ -145,10 +142,6 @@ class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
         widget.isPlayingNotifier.value = _isPlaying;
       });
     });
-
-    // Initialize the controllers and animations
-    _charControllers = [];
-    _colorAnimations = [];
   }
 
   // cập nhật vị trí dòng hiện tại
@@ -194,23 +187,6 @@ class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
         'https://storage.googleapis.com/ikara-storage/ikara/lyrics.xml');
     setState(() {
       data = list;
-      for (final line in data) {
-        for (final word in line.words) {
-          for (int i = 0; i < word.text.length; i++) {
-            final charController = AnimationController(
-              duration: Duration(milliseconds: wordDuration.toInt()),
-              vsync: this, // đồng bộ với tốc độ, đảm bảo mượt mà và tiết kiệm tài nguyên
-            );
-            final charColorTween = ColorTween(
-              begin: Colors.white,
-              end: Colors.yellow,
-            ).animate(charController);
-
-            _charControllers.add(charController);
-            _colorAnimations.add(charColorTween);
-          }
-        }
-      }
     });
     return list;
   }
@@ -231,9 +207,6 @@ class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
   @override
   void dispose() {
     audioPlayer.dispose();
-    for (var controller in _charControllers) {
-      controller.dispose();
-    }
     _audioPositionSubscription.cancel();
     _audioDurationSubscription.cancel();
     super.dispose();
@@ -279,8 +252,9 @@ class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
 
     // Hàm để tạo TextSpan cho từng ký tự
     TextSpan buildTextSpan(Line line) {
+
+      // ds chứa các textSpan đại diện cho từng ký tự của dòng văn bản
       List<TextSpan> spans = [];
-      int charControllerIndex = 0;
 
       for (int i = 0; i < line.words.length; i++) {
         final word = line.words[i];
@@ -293,28 +267,24 @@ class _LoadLyricsState extends State<LoadLyrics> with TickerProviderStateMixin {
           final charTimeStart =
               wordStartTime + j * (wordDuration / word.text.length);
 
-          if (charControllerIndex >= _charControllers.length) break;
+          // Tính toán tiến độ dựa trên thời gian hiện tại và thời gian bắt đầu của ký tự chia cho thời gian kéo dài của từ
+          double progress = (_currentPosition - charTimeStart) / wordDuration;
 
-          final charController = _charControllers[charControllerIndex];
-          final charColorTween = _colorAnimations[charControllerIndex];
+          // Giới hạn tiến độ từ 0 đến 1 để tránh giá trị ngoài khoảng
+          progress = progress.clamp(0.0, 1.0);
 
-          if (_currentPosition >= charTimeStart) {
-            charController.forward(
-                from: (_currentPosition - charTimeStart) / wordDuration);
-          } else {
-            charController.reset();
-          }
+          // Sử dụng Color.lerp để chuyển màu từ trắng sang xanh lam dựa trên tiến độ
+          Color charColor =
+              Color.lerp(Colors.white, Colors.yellowAccent, progress)!;
 
           spans.add(TextSpan(
             text: word.text[j],
             style: TextStyle(
-              color: charColorTween.value, // Áp dụng màu từ Tween
+              color: charColor, // Áp dụng màu từ Tween
               fontSize: 22,
               fontWeight: FontWeight.bold,
             ),
           ));
-
-          charControllerIndex++;
         }
       }
       return TextSpan(children: spans);
